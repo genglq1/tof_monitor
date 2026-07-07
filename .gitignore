@@ -1,0 +1,29 @@
+# ===== 数据目录（运行时生成，含大量估值表二进制文件，禁止入库） =====
+data/
+
+# ===== Python 缓存 =====
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# ===== 日志 =====
+logs/
+
+# ===== 本地配置（含明文邮箱密码，禁止入库；请用 config.example.yaml 作模板） =====
+config.yaml
+
+# ===== 工具 / IDE 本地状态 =====
+.codebuddy/
+.idea/
+.vscode/
+
+# ===== 操作系统 / 编辑器 =====
+.DS_Store
+Thumbs.db
+*.swp
+*~
+
+# ===== 临时产物 =====
+*_tmp_*
+*.tmp

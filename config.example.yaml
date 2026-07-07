@@ -1,0 +1,47 @@
+# 配置模板（config.yaml 已被 .gitignore 忽略，含明文密码，禁止入库）
+# 使用方法：复制本文件为 config.yaml 并填入真实凭证后本地使用。
+paths:
+  raw_data: "data/估值表"
+  output: "data/output"
+  archive_base: "data/archive"
+  logs: "logs"
+  # 持仓明细中间工作表（下游 classify / 管理人回填 / 穿透 强依赖，路径需固定）
+  holding_full: "data/持仓统计结果/信托计划持仓_完整.xlsx"
+  holding_std: "data/持仓统计结果/信托计划持仓_标准.xlsx"
+  # 估值统计中间工作表（下游穿透强依赖）
+  valuation_stats: "data/信托产品估值统计结果.xlsx"
+  # 底层估值表目录（穿透用），未配置则不跑穿透
+  underlying_data: "data/估值表/文件分类"
+  # 管理人全称映射表（管理人回填强依赖，需人工维护）
+  manager_mapping: "data/管理人全量池/MANAGER_FULLNAME.xlsx"
+  # 净值表目录（净值分析用，与估值表不同），未配置则不跑净值分析
+  nav_input: "data/净值表"
+
+email:
+  # === 邮件列表获取配置 ===
+  mail_list_threads: 200
+  mail_list_timeout: 30
+  mail_list_retry: 3
+  mail_list_limit: 0    # 最多获取N封邮件，0表示不限制
+
+  # === 附件下载配置 ===
+  download_threads: 50
+  batch_size: 4
+  download_timeout: 1       # 下载单封邮件超时秒数
+  download_retry: 2           # 下载失败重试次数
+  max_attachment_size: 100     # 最大附件大小(MB)，超过跳过
+  use_hash: false
+  extract_zip: true
+  hash_cache: "data/mail_hash.json"
+  # === 服务器配置 ===
+  server: "imap.zyxt.com.cn"
+  port: 993
+  username: "<EMAIL_USERNAME>"          # 替换为真实邮箱账号
+  password: "<EMAIL_PASSWORD>"          # 替换为真实邮箱密码（勿提交）
+  folder: "INBOX"
+  # === 邮件搜索范围 ===
+  # 模式1: 相对天数（优先使用）
+  search_days:              # 搜索最近N天，留空则用绝对日期
+  # 模式2: 绝对日期（search_days为空时使用）
+  search_since: "20260101"   # 起始日期（YYYYMMDD）
+  search_before: "20261231"  # 结束日期（YYYYMMDD），留空则到今天
