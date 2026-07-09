@@ -29,7 +29,7 @@ class MailDownloader:
         self.max_attachment_size = config.get("max_attachment_size", 100)  # MB
         self.use_hash = config.get("use_hash", True)
         self.extract_zip = config.get("extract_zip", True)
-        self.hash_file = Path(config.get("hash_cache", "data/mail_hash.json"))
+        self.hash_file = Path(config.get("hash_cache", "data/cache/mail_hash.json"))
         self.hash_set = self._load_hashes()
         self.hash_lock = threading.Lock()
         self.stats = {"files": 0, "no_attach": 0, "failed": 0, "skipped": 0}

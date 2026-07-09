@@ -43,7 +43,7 @@ from storage.file_store import FileStore
 def main():
     parser = argparse.ArgumentParser(description="信托TOF投后管理系统")
     parser.add_argument("--config", default="config.yaml")
-    parser.add_argument("--mode", choices=["email", "local", "classify", "nav"], default="local")
+    parser.add_argument("--mode", choices=["email", "local", "holding", "penetration", "classify", "nav"], default="holding")
     parser.add_argument("--date", default=datetime.now().strftime("%Y%m%d"))
     parser.add_argument("--since", help="邮件起始日期 (YYYYMMDD)")
     parser.add_argument("--before", help="邮件结束日期 (YYYYMMDD)")
@@ -88,21 +88,23 @@ def main():
             return
 
         # 保存邮件列表到Excel
-        mail_list_path = Path(cfg["paths"]["raw_data"]) / "邮件列表.xlsx"
+        cache_dir = Path(cfg["paths"]["cache_dir"])
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        mail_list_path = cache_dir / "邮件列表.xlsx"
         ec.export_mail_list(mail_list, mail_list_path)
 
         # 阶段2：断点续传下载附件（下载器内部会自动跳过已存在的文件夹）
-        raw_dir = Path(cfg["paths"]["raw_data"])
+        # 下载落点：cache_dir/_原始邮件（邮件原始缓存，与源数据分离）
         all_uids = [m['uid'] for m in mail_list]
         logger.info(f"开始下载附件，共 {len(all_uids)} 封，下载器会自动跳过已存在的文件夹")
-        trust_files = ec.download_attachments_by_uids(all_uids, raw_dir, mail_list)
+        trust_files = ec.download_attachments_by_uids(all_uids, cache_dir, mail_list)
 
         ec.disconnect()
 
-        # 阶段3：文件分类（按投资标的分类）
-        classifier_output = raw_dir / "文件分类"
+        # 阶段3：文件分类（按投资标的分类）→ 底层估值表目录（穿透用）
+        classifier_output = Path(cfg["paths"]["underlying_data"])
         project_file = Path(cfg["paths"]["holding_std"])
-        newly_copied = _run_classifier(project_file, raw_dir, classifier_output, since, before)
+        newly_copied = _run_classifier(project_file, cache_dir, classifier_output, since, before)
 
         # 阶段4：将本次新复制的文件构造为 ValuationFile 列表
         trust_files = []
@@ -125,8 +127,10 @@ def main():
         underlying_files = []
     elif args.mode == "classify":
         # 仅分类：已有附件，只做分类
-        raw_dir = Path(cfg["paths"]["raw_data"])
-        classifier_output = raw_dir / "文件分类"
+        # 源：cache_dir/_原始邮件；输出：底层估值表目录
+        cache_dir = Path(cfg["paths"]["cache_dir"])
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        classifier_output = Path(cfg["paths"]["underlying_data"])
         project_file = Path(cfg["paths"]["holding_std"])
 
         days = cfg.get("email", {}).get("search_days")
@@ -137,14 +141,14 @@ def main():
             since = args.since or cfg.get("email", {}).get("search_since", "")
             before = args.before or cfg.get("email", {}).get("search_before", "")
 
-        _run_classifier(project_file, raw_dir, classifier_output, since, before)
+        _run_classifier(project_file, cache_dir, classifier_output, since, before)
         logger.success("分类完成")
         return
     elif args.mode == "nav":
         # 净值分析：扫描净值表目录，输出净值分析结果.xlsx + 曲线图
         from core.nav_analyzer import NavAnalyzer as _NavAnalyzer
         from reporters.nav_reporter import NavReporter as _NavReporter
-        nav_input = Path(cfg["paths"].get("nav_input", "data/净值表"))
+        nav_input = Path(cfg["paths"].get("nav_input", "data/input/净值表"))
         nav_out_dir = Path(cfg["paths"]["output"]) / "净值分析"
         if not nav_input.exists():
             logger.warning(f"净值表目录不存在，跳过净值分析: {nav_input}")
@@ -157,119 +161,126 @@ def main():
         out = _NavReporter().write_report(metrics, nav_out_dir)
         logger.success(f"净值分析完成: {out}（{len(metrics)} 条）")
         return
-    else:
-        # 本地模式：扫描 raw_data 目录
+    elif args.mode in ("local", "holding"):
+        # 持仓明细 + 估值统计 + 管理人回填（+ 可选归档）
+        # local/holding 模式：扫描 raw_data 目录，跑完整解析管道（不含穿透报告）
         input_dir = Path(cfg["paths"]["raw_data"])
         collector = FileCollector(input_dir)
         trust_files = collector.collect()
         underlying_files = []
 
-    # 底层文件采集（如果配置了 underlying_data 目录）
-    underlying_dir = cfg["paths"].get("underlying_data")
-    if underlying_dir:
-        underlying_path = Path(underlying_dir)
-        if underlying_path.exists():
-            underlying_collector = FileCollector(underlying_path, pattern="*.xls*")
-            u_files = underlying_collector.collect()
-            for uf in u_files:
-                uf.level = "underlying"
-            underlying_files.extend(u_files)
-            logger.info(f"已采集 {len(u_files)} 个底层估值表")
+        # 底层文件采集（如果配置了 underlying_data 目录）
+        underlying_dir = cfg["paths"].get("underlying_data")
+        if underlying_dir:
+            underlying_path = Path(underlying_dir)
+            if underlying_path.exists():
+                underlying_collector = FileCollector(underlying_path, pattern="*.xls*")
+                u_files = underlying_collector.collect()
+                for uf in u_files:
+                    uf.level = "underlying"
+                underlying_files.extend(u_files)
+                logger.info(f"已采集 {len(u_files)} 个底层估值表")
 
-    if not trust_files and not underlying_files:
-        logger.warning("无任何估值文件可处理")
-        return
+        if not trust_files and not underlying_files:
+            logger.warning("无任何估值文件可处理")
+            return
 
-    # 执行管道（传入信托层和底层文件）
-    pipeline = Pipeline(trust_files, underlying_files, Path(cfg["paths"]["output"]))
-    result = pipeline.run()
+        # 执行管道（传入信托层和底层文件）
+        pipeline = Pipeline(trust_files, underlying_files, Path(cfg["paths"]["output"]))
+        result = pipeline.run()
 
-    # 生成报表
-    reporter = ExcelReporter(Path(cfg["paths"]["output"]))
-    if result["overviews"]:
-        reporter.report_overviews(result["overviews"], args.date)
-    if result["holdings"]:
-        reporter.report_holdings(result["holdings"], args.date)
-        # 产出持仓明细工作表（完整表 + 标准表），供下游 classify/管理人回填/穿透 消费
-        from reporters.holding_reporter import HoldingReporter as _HoldingReporter
-        from core.manager import ManagerFiller as _ManagerFiller
-        hr = _HoldingReporter()
-        full_path = Path(cfg["paths"]["holding_full"])
-        std_path = Path(cfg["paths"]["holding_std"])
-        hr.write_full(result["holdings"], full_path)
-        hr.write_std(result["holdings"], std_path)
-        # 管理人回填：读完整表 -> 填 产品类型/管理人名称 -> 写回（下游穿透/分类强依赖）
-        mapping_file = Path(cfg["paths"].get("manager_mapping"))
-        if mapping_file.exists():
-            _ManagerFiller().fill_file(full_path, mapping_file)
-            logger.info(f"管理人回填完成（映射: {mapping_file}）")
-        else:
-            logger.warning(f"管理人映射文档不存在，跳过回填: {mapping_file}")
-        logger.info(f"持仓完整表: {full_path}")
-        logger.info(f"持仓标准表: {std_path}")
-
-    # 产出估值统计工作表（下游穿透强依赖），供 classify/穿透 消费
-    from parsers.valuation_stats import ValuationStatsParser as _ValuationStatsParser
-    from reporters.valuation_reporter import ValuationReporter as _ValuationReporter
-    vs_path = Path(cfg["paths"]["valuation_stats"])
-    vparser = _ValuationStatsParser()
-    vstats, vempty = vparser.parse(Path(cfg["paths"]["raw_data"]))
-    if vstats:
-        _ValuationReporter().write_stats(vstats, vs_path, vempty)
-        logger.info(f"估值统计表: {vs_path}")
-    else:
-        logger.warning("未生成估值统计表（无有效估值文件）")
-
-    # 穿透报告：对每个项目，基于标准表 + 估值统计表 + 底层估值表 生成
-    from parsers.penetration import PenetrationParser as _PenetrationParser
-    from reporters.penetration_reporter import PenetrationReporter as _PenetrationReporter
-    holding_std_file = Path(cfg["paths"]["holding_std"])
-    valuation_stats_file = Path(cfg["paths"]["valuation_stats"])
-    pen_out_dir = Path(cfg["paths"]["output"]) / "穿透报告"
-    if holding_std_file.exists() and valuation_stats_file.exists():
-        # 信托目录搜索顺序：config 路径优先，旧默认目录兜底
-        pen_search = []
-        underlying = cfg["paths"].get("underlying_data")
-        if underlying:
-            pen_search.append(Path(underlying))
-        pen_search.append(Path(cfg["paths"].get("archive_base", "data/archive")))
-        raw = Path(cfg["paths"]["raw_data"])
-        pen_search.append(raw / "_原始邮件" / "文件分类")
-        pen_search.append(raw / "文件分类")
-        root = Path(cfg["paths"]["raw_data"]).parent
-        pen_search += [root / "估值表" / "文件分类", root / "archive",
-                       root / "_原始邮件" / "文件分类", root / "文件分类"]
-        try:
-            hs = pd.read_excel(holding_std_file)
-            codes = [c for c in hs['项目代码'].astype(str).str.upper().unique().tolist() if c]
-        except Exception as e:
-            codes = []
-            logger.warning(f"读取标准表失败，跳过穿透: {e}")
-        pparser = _PenetrationParser()
-        prep = _PenetrationReporter()
-        for code in codes:
-            res = pparser.generate(code, args.date, holding_std_file, valuation_stats_file, pen_search)
-            if res.success:
-                out = prep.write_report(res, pen_out_dir)
-                logger.info(f"穿透报告: {out}")
+        # 生成报表
+        reporter = ExcelReporter(Path(cfg["paths"]["output"]))
+        if result["overviews"]:
+            reporter.report_overviews(result["overviews"], args.date)
+        if result["holdings"]:
+            reporter.report_holdings(result["holdings"], args.date)
+            # 产出持仓明细工作表（完整表 + 标准表），供下游 classify/管理人回填/穿透 消费
+            from reporters.holding_reporter import HoldingReporter as _HoldingReporter
+            from core.manager import ManagerFiller as _ManagerFiller
+            hr = _HoldingReporter()
+            full_path = Path(cfg["paths"]["holding_full"])
+            std_path = Path(cfg["paths"]["holding_std"])
+            hr.write_full(result["holdings"], full_path)
+            hr.write_std(result["holdings"], std_path)
+            # 管理人回填：读完整表 -> 填 产品类型/管理人名称 -> 写回（下游穿透/分类强依赖）
+            mapping_file = Path(cfg["paths"].get("manager_mapping"))
+            if mapping_file.exists():
+                _ManagerFiller().fill_file(full_path, mapping_file)
+                logger.info(f"管理人回填完成（映射: {mapping_file}）")
             else:
-                logger.warning(f"项目 {code} 未生成穿透报告（无信托目录或持仓）")
-    else:
-        logger.warning("标准表或估值统计表缺失，跳过穿透报告")
+                logger.warning(f"管理人映射文档不存在，跳过回填: {mapping_file}")
+            logger.info(f"持仓完整表: {full_path}")
+            logger.info(f"持仓标准表: {std_path}")
 
-    # 文件归档（可选）
-    if cfg.get("paths", {}).get("archive_base"):
-        fs = FileStore(Path(cfg["paths"]["archive_base"]))
-        fs.organize_from_classification(
-            result["holdings"],
-            trust_files,
-            Path(cfg["paths"]["archive_base"])
-        )
+        # 产出估值统计工作表（下游穿透强依赖），供 classify/穿透 消费
+        from parsers.valuation_stats import ValuationStatsParser as _ValuationStatsParser
+        from reporters.valuation_reporter import ValuationReporter as _ValuationReporter
+        vs_path = Path(cfg["paths"]["valuation_stats"])
+        vparser = _ValuationStatsParser()
+        vstats, vempty = vparser.parse(Path(cfg["paths"]["raw_data"]))
+        if vstats:
+            _ValuationReporter().write_stats(vstats, vs_path, vempty)
+            logger.info(f"估值统计表: {vs_path}")
+        else:
+            logger.warning("未生成估值统计表（无有效估值文件）")
 
-    if result["errors"]:
-        logger.error(f"处理完成，但存在 {len(result['errors'])} 个错误")
+        # 文件归档（可选）
+        if cfg.get("paths", {}).get("archive_base"):
+            fs = FileStore(Path(cfg["paths"]["archive_base"]))
+            fs.organize_from_classification(
+                result["holdings"],
+                trust_files,
+                Path(cfg["paths"]["archive_base"])
+            )
+
+        if result["errors"]:
+            logger.error(f"处理完成，但存在 {len(result['errors'])} 个错误")
+        else:
+            logger.success("持仓明细/估值统计/管理人回填 处理完成")
+
+    elif args.mode == "penetration":
+        # 穿透报告：仅基于已有的 持仓标准表 + 估值统计表 + 底层估值表 生成
+        # 不重新解析信托层估值表，适用于已跑过 holding 后单独补跑/重跑穿透
+        from parsers.penetration import PenetrationParser as _PenetrationParser
+        from reporters.penetration_reporter import PenetrationReporter as _PenetrationReporter
+        holding_std_file = Path(cfg["paths"]["holding_std"])
+        valuation_stats_file = Path(cfg["paths"]["valuation_stats"])
+        pen_out_dir = Path(cfg["paths"]["output"]) / "穿透报告"
+        if holding_std_file.exists() and valuation_stats_file.exists():
+            # 信托目录搜索顺序：config 路径优先，旧默认目录兜底
+            pen_search = []
+            underlying = cfg["paths"].get("underlying_data")
+            if underlying:
+                pen_search.append(Path(underlying))  # data/input/底层估值表
+            pen_search.append(Path(cfg["paths"].get("archive_base", "data/archive")))
+            cache_dir = Path(cfg["paths"].get("cache_dir", "data/cache"))
+            pen_search.append(cache_dir / "_原始邮件" / "文件分类")
+            pen_search.append(cache_dir / "文件分类")
+            raw = Path(cfg["paths"]["raw_data"])
+            pen_search.append(raw / "_原始邮件" / "文件分类")
+            pen_search.append(raw / "文件分类")
+            try:
+                hs = pd.read_excel(holding_std_file)
+                codes = [c for c in hs['项目代码'].astype(str).str.upper().unique().tolist() if c]
+            except Exception as e:
+                codes = []
+                logger.warning(f"读取标准表失败，跳过穿透: {e}")
+            pparser = _PenetrationParser()
+            prep = _PenetrationReporter()
+            for code in codes:
+                res = pparser.generate(code, args.date, holding_std_file, valuation_stats_file, pen_search)
+                if res.success:
+                    out = prep.write_report(res, pen_out_dir)
+                    logger.info(f"穿透报告: {out}")
+                else:
+                    logger.warning(f"项目 {code} 未生成穿透报告（无信托目录或持仓）")
+            logger.success("穿透报告生成完成")
+        else:
+            logger.warning("标准表或估值统计表缺失，跳过穿透报告（请先运行 holding 模式）")
+
     else:
-        logger.success("全部处理完成")
+        logger.error(f"未知模式: {args.mode}")
 
 if __name__ == "__main__":
     main()
