@@ -16,7 +16,7 @@
 from pathlib import Path
 import pandas as pd
 
-from core.rules import detect_product_type
+from core.rules import detect_product_type_with_cost
 
 
 class ManagerFiller:
@@ -60,15 +60,19 @@ class ManagerFiller:
 
         kw_list = self.load_mapping(mapping_file)
 
+        # 成本科目名称作为强信号辅助判型（完整表带此列；缺失时回退纯名称判型）
+        has_cost = "成本科目名称" in df.columns
+
         type_col = []
         manager_col = []
-        for raw in df["投资标的"]:
+        for idx, raw in enumerate(df["投资标的"]):
             name = str(raw).strip() if pd.notna(raw) else ""
             if not name:
                 type_col.append("其他")
                 manager_col.append("")
                 continue
-            ptype = detect_product_type(name)
+            cost_name = str(df.at[df.index[idx], "成本科目名称"]).strip() if has_cost else ""
+            ptype = detect_product_type_with_cost(name, cost_name)
             # 1) 精确 (产品类型, 关键字) 优先
             full = ""
             for ex_ptype, ex_kw, ex_full in kw_list:

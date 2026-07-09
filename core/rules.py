@@ -62,7 +62,12 @@ PRODUCT_TYPE_RULES = [
     ("私募",   ["私募证券", "私募基金", "私募投资"]),
     ("公募",   ["ETF", "LOF", "QDII", "FOF",
                 "货币市场基金", "债券型证券投资基金", "股票型证券投资基金",
-                "混合型证券投资基金", "指数型证券投资基金", "指数增强"]),
+                "混合型证券投资基金", "指数型证券投资基金", "指数增强",
+                # 公募基金简称（持仓标的用简称 + A/C/B 份额后缀，不含完整类型后缀）
+                "债券A", "债券B", "债券C",
+                "混合A", "混合B", "混合C",
+                "股票A", "股票B", "股票C",
+                "货币A", "货币B", "货币C"]),
 ]
 
 
@@ -78,3 +83,26 @@ def detect_product_type(name: str) -> str:
         if any(kw in s for kw in kws):
             return ptype
     return "其他"
+
+
+# 成本科目名称 → 产品类型的强信号（比产品名称更可靠，覆盖简称/无后缀的公募）
+# 依据：估值表中「开放式基金成本/ETF基金成本/货币基金成本」100% 为公募，
+# 「证券/其他资产管理产品成本」为资管/私募，无反例。
+COST_NAME_TYPE = {
+    "开放式基金成本": "公募",
+    "ETF基金成本": "公募",
+    "货币基金成本": "公募",
+}
+
+
+def detect_product_type_with_cost(name: str, cost_name: str = "") -> str:
+    """结合产品名称与成本科目名称识别产品类型。
+
+    优先用成本科目名称（强信号，覆盖东方添益债券等无份额后缀的公募、
+    及恒生股息等 ETF 简称），名称规则作为兜底。
+    """
+    cost = str(cost_name).strip() if cost_name else ""
+    if cost in COST_NAME_TYPE:
+        return COST_NAME_TYPE[cost]
+    return detect_product_type(name)
+
